@@ -11,6 +11,8 @@
 		13B07FBF1A68108700A75B9A /* Images.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 13B07FB51A68108700A75B9A /* Images.xcassets */; };
 		761780ED2CA45674006654EE /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 761780EC2CA45674006654EE /* AppDelegate.swift */; };
 		81AB9BB82411601600AC10FF /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */; };
+		E8F572183B2C43A4B12B6ADA /* XyzFrameProcessor.m in Sources */ = {isa = PBXBuildFile; fileRef = F54068C31F8A4C78A248862C /* XyzFrameProcessor.m */; };
+		108D8A2124564029927280D7 /* XyzFrameProcessor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D829024C3104756A2E9AA51 /* XyzFrameProcessor.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -24,6 +26,8 @@
 		761780EC2CA45674006654EE /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AppDelegate.swift; path = MyApp/AppDelegate.swift; sourceTree = "<group>"; };
 		81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = file.storyboard; name = LaunchScreen.storyboard; path = MyApp/LaunchScreen.storyboard; sourceTree = "<group>"; };
 		ED297162215061F000B7C4FE /* JavaScriptCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = JavaScriptCore.framework; path = System/Library/Frameworks/JavaScriptCore.framework; sourceTree = SDKROOT; };
+		F54068C31F8A4C78A248862C /* XyzFrameProcessor.m */ = {isa = PBXFileReference; name = "XyzFrameProcessor.m"; path = "XyzFrameProcessor.m"; sourceTree = "<group>"; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; explicitFileType = undefined; includeInIndex = 0; };
+		0D829024C3104756A2E9AA51 /* XyzFrameProcessor.swift */ = {isa = PBXFileReference; name = "XyzFrameProcessor.swift"; path = "XyzFrameProcessor.swift"; sourceTree = "<group>"; fileEncoding = 4; lastKnownFileType = sourcecode.swift; explicitFileType = undefined; includeInIndex = 0; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -74,6 +78,7 @@
 				83CBBA001A601CBA00E9B192 /* Products */,
 				2D16E6871FA4F8E400B85C8A /* Frameworks */,
 				BBD78D7AC51CEA395F1C20DB /* Pods */,
+				7849A2F739CE4DD487A0521A /* XyzFrameProcessor */,
 			);
 			indentWidth = 2;
 			sourceTree = "<group>";
@@ -95,6 +100,16 @@
 				5709B34CF0A7D63546082F79 /* Pods-MyApp.release.xcconfig */,
 			);
 			path = Pods;
+			sourceTree = "<group>";
+		};
+		7849A2F739CE4DD487A0521A /* XyzFrameProcessor */ = {
+			isa = PBXGroup;
+			children = (
+				F54068C31F8A4C78A248862C /* XyzFrameProcessor.m */,
+				0D829024C3104756A2E9AA51 /* XyzFrameProcessor.swift */,
+			);
+			name = XyzFrameProcessor;
+			path = XyzFrameProcessor;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -245,6 +260,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				761780ED2CA45674006654EE /* AppDelegate.swift in Sources */,
+				E8F572183B2C43A4B12B6ADA /* XyzFrameProcessor.m in Sources */,
+				108D8A2124564029927280D7 /* XyzFrameProcessor.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
