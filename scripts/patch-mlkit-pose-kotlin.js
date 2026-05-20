@@ -41,6 +41,10 @@ const PATCHED_BLOCK = `      fun addLandmarkToMap(landmark: PoseLandmark?, landm
         map.putMap(landmarkName, landmarkMap)
       }`;
 
+const RETURN_ORIGINAL = '      return map.toHashMap()';
+const RETURN_PATCHED = `      @Suppress("UNCHECKED_CAST")
+      return map.toHashMap() as HashMap<String, Any>`;
+
 function main() {
   if (!fs.existsSync(KOTLIN_PATH)) {
     console.log(
@@ -49,25 +53,40 @@ function main() {
     return;
   }
 
-  const original = fs.readFileSync(KOTLIN_PATH, 'utf8');
+  let source = fs.readFileSync(KOTLIN_PATH, 'utf8');
+  let changed = false;
 
-  if (original.includes('inFrameLikelihood')) {
+  if (!source.includes('inFrameLikelihood')) {
+    if (!source.includes(ORIGINAL_BLOCK)) {
+      console.warn(
+        '[patch-mlkit-pose-kotlin] Could not find addLandmarkToMap block — plugin version changed?',
+      );
+    } else {
+      source = source.replace(ORIGINAL_BLOCK, PATCHED_BLOCK);
+      changed = true;
+      console.log(
+        '[patch-mlkit-pose-kotlin] ✓ Added inFrameLikelihood to native landmarks.',
+      );
+    }
+  } else {
     console.log(
-      '[patch-mlkit-pose-kotlin] Already patched (inFrameLikelihood present).',
+      '[patch-mlkit-pose-kotlin] inFrameLikelihood already present.',
     );
-    return;
   }
 
-  if (!original.includes(ORIGINAL_BLOCK)) {
-    console.warn(
-      '[patch-mlkit-pose-kotlin] Could not find addLandmarkToMap block — plugin version changed?',
+  if (source.includes(RETURN_ORIGINAL) && !source.includes('as HashMap<String, Any>')) {
+    source = source.replace(RETURN_ORIGINAL, RETURN_PATCHED);
+    changed = true;
+    console.log(
+      '[patch-mlkit-pose-kotlin] ✓ Fixed HashMap return type for Kotlin compiler.',
     );
-    return;
   }
 
-  const patched = original.replace(ORIGINAL_BLOCK, PATCHED_BLOCK);
-  fs.writeFileSync(KOTLIN_PATH, patched, 'utf8');
-  console.log('[patch-mlkit-pose-kotlin] ✓ Added inFrameLikelihood to native landmarks.');
+  if (changed) {
+    fs.writeFileSync(KOTLIN_PATH, source, 'utf8');
+  } else if (source.includes('as HashMap<String, Any>')) {
+    console.log('[patch-mlkit-pose-kotlin] Already fully patched.');
+  }
 }
 
 main();

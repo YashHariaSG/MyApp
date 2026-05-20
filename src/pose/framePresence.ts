@@ -1,3 +1,4 @@
+import { DIM_LUMINANCE_THRESHOLD } from './frameBrightness';
 import type { Keypoint, PresenceResult } from './types';
 
 /** ML Kit's `inFrameLikelihood` — values above this are considered visible. */
@@ -454,16 +455,85 @@ export function hasLegsInView(keypoints: Keypoint[]): boolean {
   );
 }
 
-export function hasChinVisible(keypoints: Keypoint[]): boolean {
-  return kp(keypoints, 0) != null;
+/** Head / chin area: nose confident and not cropped at the top edge. */
+export function hasHeadInFrame(keypoints: Keypoint[]): boolean {
+  return hasClearFace(keypoints);
 }
 
+/** Both ankles visible and inside the frame (full legs in view). */
+export function hasAnklesInFrame(keypoints: Keypoint[]): boolean {
+  const lAnkle = kpLeg(keypoints, 15);
+  const rAnkle = kpLeg(keypoints, 16);
+  if (!lAnkle || !rAnkle) {
+    return false;
+  }
+  return (
+    isInsideFrame(lAnkle, BODY_EDGE_MARGIN) &&
+    isInsideFrame(rAnkle, BODY_EDGE_MARGIN)
+  );
+}
+
+/** Full body: head (face) + both ankles visible in frame. */
+export function hasFullBodyInFrame(keypoints: Keypoint[]): boolean {
+  return hasHeadInFrame(keypoints) && hasAnklesInFrame(keypoints);
+}
+
+/** @deprecated Use {@link hasHeadInFrame}. */
+export function hasChinVisible(keypoints: Keypoint[]): boolean {
+  return hasHeadInFrame(keypoints);
+}
+
+/** @deprecated Use {@link hasAnklesInFrame}. */
 export function hasAnkleVisible(keypoints: Keypoint[]): boolean {
-  return kp(keypoints, 15) != null || kp(keypoints, 16) != null;
+  return hasAnklesInFrame(keypoints);
 }
 
 export function hasChinOrAnkleVisible(keypoints: Keypoint[]): boolean {
-  return hasChinVisible(keypoints) || hasAnkleVisible(keypoints);
+  return hasHeadInFrame(keypoints) || hasAnklesInFrame(keypoints);
+}
+
+/** Head missing or cut off at the top — user should raise / tilt phone up. */
+export function isHeadOutOfFrame(keypoints: Keypoint[]): boolean {
+  if (!hasUpperBody(keypoints)) {
+    return false;
+  }
+  return !hasHeadInFrame(keypoints);
+}
+
+/** Feet / ankles missing or cut off at the bottom — tilt phone down. */
+export function isFeetOutOfFrame(keypoints: Keypoint[]): boolean {
+  if (!hasUpperBody(keypoints)) {
+    return false;
+  }
+  if (hasAnklesInFrame(keypoints)) {
+    return false;
+  }
+
+  const lKnee = kpLeg(keypoints, 13);
+  const rKnee = kpLeg(keypoints, 14);
+  const lAnkle = kpLeg(keypoints, 15);
+  const rAnkle = kpLeg(keypoints, 16);
+
+  if (lAnkle && !isInsideFrame(lAnkle, BODY_EDGE_MARGIN)) {
+    return true;
+  }
+  if (rAnkle && !isInsideFrame(rAnkle, BODY_EDGE_MARGIN)) {
+    return true;
+  }
+
+  const kneesNearBottom =
+    (lKnee != null && lKnee.y > 1 - BODY_EDGE_MARGIN * 2) ||
+    (rKnee != null && rKnee.y > 1 - BODY_EDGE_MARGIN * 2);
+
+  return kneesNearBottom || (lKnee != null && rKnee != null);
+}
+
+export function isSceneTooDark(luminance: number | null | undefined): boolean {
+  return (
+    typeof luminance === 'number' &&
+    Number.isFinite(luminance) &&
+    luminance < DIM_LUMINANCE_THRESHOLD
+  );
 }
 
 /** Both knees (when visible) must be bent — no mixed posture. */
@@ -482,6 +552,11 @@ export function areLegsFolded(keypoints: Keypoint[]): boolean {
   );
 }
 
+type BuildResultOptions = {
+  fullBody?: boolean;
+  lightingOk?: boolean;
+};
+
 function buildResult(
   status: PresenceResult['status'],
   visibleCount: number,
@@ -491,7 +566,11 @@ function buildResult(
   noCropCheck: boolean,
   title: string,
   message: string,
+  options: BuildResultOptions = {},
 ): PresenceResult {
+  const fullBody = options.fullBody ?? false;
+  const lightingOk = options.lightingOk ?? true;
+
   return {
     status,
     visibleCount,
@@ -500,22 +579,45 @@ function buildResult(
     title,
     message,
     checks: [
-      { id: 'visible', label: 'Person in sitting frame', passed: isInFrame },
+      { id: 'lighting', label: 'Lighting bright enough', passed: lightingOk },
+      { id: 'visible', label: 'Person visible', passed: isInFrame },
+      { id: 'full_body', label: 'Full body in frame', passed: fullBody },
+      { id: 'face', label: 'Head / face visible', passed: hasClearFaceCheck },
+      { id: 'no_crop', label: 'Upper body not cropped', passed: noCropCheck },
       { id: 'sitting', label: 'Legs folded / crossed', passed: isSitting },
-      { id: 'face', label: 'Face clearly visible', passed: hasClearFaceCheck },
-      { id: 'no_crop', label: 'No face/upper-body cropping', passed: noCropCheck },
     ],
   };
 }
+
+export type FramePresenceOptions = {
+  luminance?: number | null;
+};
 
 export function evaluateFramePresence(
   keypoints: Keypoint[],
   smoothedSitting: number,
   sittingLocked: boolean,
+  options: FramePresenceOptions = {},
 ): PresenceResult {
   const visibleCount = keypoints.filter(p => p.score >= MIN_SCORE).length;
   const faceClear = hasClearFace(keypoints);
   const noCrop = hasFullUpperBodyInFrame(keypoints);
+  const fullBody = hasFullBodyInFrame(keypoints);
+  const lightingOk = !isSceneTooDark(options.luminance);
+
+  if (!lightingOk) {
+    return buildResult(
+      'too_dark',
+      visibleCount,
+      false,
+      false,
+      false,
+      false,
+      'Turn on the lights',
+      'The room is too dim. Please turn on the lights so you are clearly visible.',
+      { fullBody: false, lightingOk: false },
+    );
+  }
 
   if (!hasUpperBody(keypoints)) {
     return buildResult(
@@ -525,8 +627,9 @@ export function evaluateFramePresence(
       false,
       false,
       false,
-      'No one in view',
-      'Sit in front of the camera with your face clearly visible.',
+      'Person not visible',
+      'Sit in front of the camera so your full body can be seen.',
+      { fullBody: false, lightingOk: true },
     );
   }
 
@@ -539,7 +642,36 @@ export function evaluateFramePresence(
       faceClear,
       noCrop,
       'Out of frame',
-      'Move so your full face and upper body are inside the frame.',
+      'Move so your full body is inside the camera view.',
+      { fullBody: false, lightingOk: true },
+    );
+  }
+
+  if (isHeadOutOfFrame(keypoints)) {
+    return buildResult(
+      'out_of_frame',
+      visibleCount,
+      false,
+      false,
+      false,
+      noCrop,
+      'Show your head',
+      'Your head is cut off. Move your phone up or tilt it up until your face is fully visible.',
+      { fullBody: false, lightingOk: true },
+    );
+  }
+
+  if (isFeetOutOfFrame(keypoints)) {
+    return buildResult(
+      'out_of_frame',
+      visibleCount,
+      false,
+      false,
+      faceClear,
+      noCrop,
+      'Show your feet',
+      'Your ankles are not visible. Tilt your phone down until your full legs and feet are in frame.',
+      { fullBody: false, lightingOk: true },
     );
   }
 
@@ -553,6 +685,7 @@ export function evaluateFramePresence(
       noCrop,
       'Show your face',
       'Keep your face clear, forward, and unobstructed.',
+      { fullBody: false, lightingOk: true },
     );
   }
 
@@ -565,7 +698,22 @@ export function evaluateFramePresence(
       true,
       false,
       'No cropping',
-      'Keep full face and upper body inside the frame.',
+      'Keep your full body inside the frame — head to ankles.',
+      { fullBody: false, lightingOk: true },
+    );
+  }
+
+  if (!fullBody) {
+    return buildResult(
+      'out_of_frame',
+      visibleCount,
+      false,
+      false,
+      faceClear,
+      noCrop,
+      'Full body needed',
+      'Adjust the camera so your head and both ankles are visible from head to toe.',
+      { fullBody: false, lightingOk: true },
     );
   }
 
@@ -579,6 +727,7 @@ export function evaluateFramePresence(
       noCrop,
       'Please sit down',
       'You are standing — please sit.',
+      { fullBody: true, lightingOk: true },
     );
   }
 
@@ -598,6 +747,7 @@ export function evaluateFramePresence(
       noCrop,
       'Show your hips',
       'Move back so your hips are clearly visible in the frame.',
+      { fullBody: true, lightingOk: true },
     );
   }
 
@@ -610,7 +760,8 @@ export function evaluateFramePresence(
       faceClear,
       noCrop,
       'Show your legs',
-      'Move back so both knees are visible in the frame.',
+      'Tilt your phone down or move back so both knees and ankles are visible.',
+      { fullBody: true, lightingOk: true },
     );
   }
 
@@ -624,6 +775,7 @@ export function evaluateFramePresence(
       noCrop,
       'Fold both legs',
       'One leg is straight and the other is bent. Fold both legs the same way.',
+      { fullBody: true, lightingOk: true },
     );
   }
 
@@ -637,6 +789,7 @@ export function evaluateFramePresence(
       true,
       'All good',
       'Cross-legged sitting detected — perfect!',
+      { fullBody: true, lightingOk: true },
     );
   }
 
@@ -658,6 +811,7 @@ export function evaluateFramePresence(
       noCrop,
       'Fold your legs',
       'Your legs are straight. Fold them (cross-legged) to sit properly.',
+      { fullBody: true, lightingOk: true },
     );
   }
 
@@ -673,7 +827,8 @@ export function evaluateFramePresence(
       faceClear,
       noCrop,
       'Hold still',
-      'Keep your legs in view while we detect your posture.',
+      'Keep your full body in view while we detect your posture.',
+      { fullBody: true, lightingOk: true },
     );
   }
 
@@ -691,7 +846,8 @@ export function evaluateFramePresence(
       true,
       true,
       'All good',
-      'You are sitting properly in frame.',
+      'You are sitting properly with your full body visible.',
+      { fullBody: true, lightingOk: true },
     );
   }
 
@@ -703,6 +859,7 @@ export function evaluateFramePresence(
     faceClear,
     noCrop,
     'Sit properly',
-    'Sit cross-legged with both knees bent and visible.',
+    'Sit cross-legged with both knees bent and your full body visible.',
+    { fullBody: true, lightingOk: true },
   );
 }

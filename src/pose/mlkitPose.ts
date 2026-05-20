@@ -95,6 +95,7 @@ export function mlkitPoseToPayload(
   pose: Record<string, unknown>,
   frameWidth: number,
   frameHeight: number,
+  luminance?: number,
 ): string {
   'worklet';
   if (pose == null) return '';
@@ -117,20 +118,59 @@ export function mlkitPoseToPayload(
     body += `${key}:${lm.x},${lm.y},${conf}`;
   }
 
-  return body.length === 0 ? '' : `${body}|${frameWidth}|${frameHeight}`;
+  if (body.length === 0) return '';
+
+  const luma =
+    typeof luminance === 'number' && Number.isFinite(luminance)
+      ? Math.round(Math.min(255, Math.max(0, luminance)))
+      : '';
+  return luma === ''
+    ? `${body}|${frameWidth}|${frameHeight}`
+    : `${body}|${frameWidth}|${frameHeight}|${luma}`;
 }
+
+export type MlkitPayloadMeta = {
+  frameWidth: number;
+  frameHeight: number;
+  luminance: number | null;
+};
 
 /** Parse ML Kit payload → 17 keypoints normalised to frame (0–1). */
 export function keypointsFromMlkitPayload(payload: string): Keypoint[] {
+  return parseMlkitPayload(payload).keypoints;
+}
+
+export function parseMlkitPayload(payload: string): {
+  keypoints: Keypoint[];
+  meta: MlkitPayloadMeta;
+} {
   const pipe = payload.indexOf('|');
-  if (pipe < 0) return [];
+  if (pipe < 0) {
+    return {
+      keypoints: [],
+      meta: { frameWidth: 0, frameHeight: 0, luminance: null },
+    };
+  }
 
   const body        = payload.slice(0, pipe);
   const meta        = payload.slice(pipe + 1).split('|');
   const frameWidth  = Number(meta[0]);
   const frameHeight = Number(meta[1]);
+  const luminanceRaw = meta[2];
+  const luminance =
+    luminanceRaw != null && luminanceRaw.length > 0
+      ? Number(luminanceRaw)
+      : null;
 
-  if (!Number.isFinite(frameWidth) || !Number.isFinite(frameHeight)) return [];
+  const emptyMeta: MlkitPayloadMeta = {
+    frameWidth: Number.isFinite(frameWidth) ? frameWidth : 0,
+    frameHeight: Number.isFinite(frameHeight) ? frameHeight : 0,
+    luminance: Number.isFinite(luminance) ? luminance : null,
+  };
+
+  if (!Number.isFinite(frameWidth) || !Number.isFinite(frameHeight)) {
+    return { keypoints: [], meta: emptyMeta };
+  }
 
   const pose: Record<string, LandmarkPoint> = {};
 
@@ -167,7 +207,7 @@ export function keypointsFromMlkitPayload(payload: string): Keypoint[] {
     };
   }
 
-  return keypoints;
+  return { keypoints, meta: emptyMeta };
 }
 
 // ─── Spine analysis ───────────────────────────────────────────────────────────

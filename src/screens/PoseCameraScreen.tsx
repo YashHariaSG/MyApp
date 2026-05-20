@@ -9,6 +9,7 @@ import {
   useCameraPermission,
   useFrameProcessor,
 } from 'react-native-vision-camera';
+import { estimateFrameLuminance } from '../pose/frameBrightness';
 import { mlkitPoseToPayload } from '../pose/mlkitPose';
 import {
   getPushNoPerson,
@@ -67,23 +68,25 @@ export default function PoseCameraScreen() {
         runAsync(frame, () => {
           'worklet';
           try {
+            const luminance = estimateFrameLuminance(frame);
             const pose = detectPose(frame, POSE_OPTIONS) as Record<
               string,
               unknown
             > | null;
             if (pose == null) {
-              pushNoPerson();
+              pushNoPerson(luminance);
               return;
             }
             const payload = mlkitPoseToPayload(
               pose,
               frame.width,
               frame.height,
+              luminance,
             );
             if (payload.length > 0) {
               pushPosePayload(payload);
             } else {
-              pushNoPerson();
+              pushNoPerson(luminance);
             }
           } catch {
             // ML Kit busy or frame dropped — skip.
@@ -166,7 +169,8 @@ export default function PoseCameraScreen() {
           {presence.isInFrame ? 'yes' : 'no'} • sitting:{' '}
           {presence.isSitting ? 'yes' : 'no'} • score:{' '}
           {presence.debug?.sitting ?? 0} • frame:{' '}
-          {presence.debug?.frame ?? '—'}
+          {presence.debug?.frame ?? '—'} • lux:{' '}
+          {presence.debug?.luminance ?? '—'}
         </Text>
       </View>
     </View>
@@ -183,6 +187,8 @@ function getHudStyle(status: PresenceResult['status']): {
       return { container: styles.hudWarn };
     case 'not_sitting':
       return { container: styles.hudError };
+    case 'too_dark':
+      return { container: styles.hudDark };
     case 'no_person':
     default:
       return { container: styles.hudNeutral };
@@ -233,6 +239,10 @@ const styles = StyleSheet.create({
   hudNeutral: {
     backgroundColor: 'rgba(40, 40, 40, 0.88)',
     borderColor: '#888',
+  },
+  hudDark: {
+    backgroundColor: 'rgba(30, 30, 60, 0.9)',
+    borderColor: '#7c8cff',
   },
   hudStatus: {
     color: '#fff',

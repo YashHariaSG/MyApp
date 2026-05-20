@@ -4,9 +4,10 @@ import {
   getSittingScore,
   hasUpperBody,
   isClearlyOutOfFrame,
+  isSceneTooDark,
   isStanding,
 } from './framePresence';
-import { keypointsFromMlkitPayload } from './mlkitPose';
+import { parseMlkitPayload } from './mlkitPose';
 import type { Keypoint, PresenceResult, PresenceStatus } from './types';
 
 export type PoseUpdate = {
@@ -23,7 +24,7 @@ type PreviewConfig = {
 
 let listener: PoseListener | null = null;
 let pushPosePayloadFn: ((payload: string) => void) | null = null;
-let pushNoPersonFn: (() => void) | null = null;
+let pushNoPersonFn: ((luminance?: number) => void) | null = null;
 let lastUiMs = 0;
 
 let smoothedSitting = 0;
@@ -34,6 +35,7 @@ let sittingLocked = false;
 
 let missStreak = 0;
 let badSittingStreak = 0;
+let smoothedLuminance = 255;
 
 let displayedPresence: PresenceResult | null = null;
 let candidateStatus: PresenceStatus | null = null;
@@ -66,7 +68,7 @@ export function getPushPosePayload(): (payload: string) => void {
   return pushPosePayloadFn;
 }
 
-export function getPushNoPerson(): () => void {
+export function getPushNoPerson(): (luminance?: number) => void {
   if (pushNoPersonFn == null) {
     pushNoPersonFn = Worklets.createRunOnJS(applyNoPerson);
   }
@@ -84,6 +86,14 @@ function resetStability(): void {
   displayedPresence = null;
   candidateStatus = null;
   candidateStreak = 0;
+  smoothedLuminance = 255;
+}
+
+function updateLuminance(luminance: number | null | undefined): void {
+  if (luminance == null || !Number.isFinite(luminance)) {
+    return;
+  }
+  smoothedLuminance = smoothedLuminance * 0.65 + luminance * 0.35;
 }
 
 function personDetected(keypoints: Keypoint[]): boolean {
@@ -157,17 +167,16 @@ function updateStablePresence(keypoints: Keypoint[]): PresenceResult {
     okStreak = Math.max(0, okStreak - 1);
   }
 
-  const result = evaluateFramePresence(
-    keypoints,
-    smoothedSitting,
-    sittingLocked,
-  );
+  const result = evaluateFramePresence(keypoints, smoothedSitting, sittingLocked, {
+    luminance: smoothedLuminance,
+  });
 
   return {
     ...result,
     debug: {
       sitting: Math.round(smoothedSitting),
       frame: lastFrameSitting,
+      luminance: Math.round(smoothedLuminance),
     },
   };
 }
@@ -228,8 +237,25 @@ function emitPresence(raw: PresenceResult): void {
   listener({ presence: stabilizeDisplay(raw) });
 }
 
-function applyNoPerson(): void {
+function applyNoPerson(luminance?: number): void {
   if (!listener) {
+    return;
+  }
+
+  updateLuminance(luminance);
+
+  if (isSceneTooDark(smoothedLuminance)) {
+    const raw = evaluateFramePresence([], 0, false, {
+      luminance: smoothedLuminance,
+    });
+    emitPresence({
+      ...raw,
+      debug: {
+        sitting: 0,
+        frame: 0,
+        luminance: Math.round(smoothedLuminance),
+      },
+    });
     return;
   }
 
@@ -255,8 +281,13 @@ function applyNoPerson(): void {
   smoothedSitting = 0;
   lastFrameSitting = 0;
 
-  const raw = evaluateFramePresence([], 0, false);
-  emitPresence({ ...raw, debug: { sitting: 0, frame: 0 } });
+  const raw = evaluateFramePresence([], 0, false, {
+    luminance: smoothedLuminance,
+  });
+  emitPresence({
+    ...raw,
+    debug: { sitting: 0, frame: 0, luminance: Math.round(smoothedLuminance) },
+  });
 }
 
 function applyPosePayload(payload: string): void {
@@ -264,10 +295,11 @@ function applyPosePayload(payload: string): void {
     return;
   }
 
-  const rawKeypoints = keypointsFromMlkitPayload(payload);
+  const { keypoints: rawKeypoints, meta } = parseMlkitPayload(payload);
+  updateLuminance(meta.luminance);
 
   if (!personDetected(rawKeypoints)) {
-    applyNoPerson();
+    applyNoPerson(meta.luminance ?? undefined);
     return;
   }
 
