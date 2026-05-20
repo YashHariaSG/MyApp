@@ -4,6 +4,10 @@ import type { Keypoint } from './types';
 /** Native ML Kit plugin keys (Android/iOS). */
 const MLKIT_LANDMARKS: { key: string; index: number }[] = [
   { key: 'nosePosition', index: 0 },
+  { key: 'leftEyePosition', index: 1 },
+  { key: 'rightEyePosition', index: 2 },
+  { key: 'leftEarPosition', index: 3 },
+  { key: 'rightEarPosition', index: 4 },
   { key: 'leftShoulderPosition', index: 5 },
   { key: 'rightShoulderPosition', index: 6 },
   { key: 'leftElbowPosition', index: 7 },
@@ -20,7 +24,7 @@ const MLKIT_LANDMARKS: { key: string; index: number }[] = [
 
 const PAYLOAD_KEYS = MLKIT_LANDMARKS.map(l => l.key);
 
-type LandmarkPoint = { x: number; y: number };
+type LandmarkPoint = { x: number; y: number; inFrameLikelihood?: number };
 
 function readLandmark(
   pose: Record<string, unknown>,
@@ -36,7 +40,9 @@ function readLandmark(
   return raw;
 }
 
-/** Worklet-safe string payload for JS bridge. */
+/** Worklet-safe string payload for JS bridge.
+ *  Format: `<key>:<x>,<y>,<confidence>;...|<frameWidth>|<frameHeight>`
+ */
 export function mlkitPoseToPayload(
   pose: Record<string, unknown>,
   frameWidth: number,
@@ -58,10 +64,12 @@ export function mlkitPoseToPayload(
     if (lm.x === 0 && lm.y === 0) {
       continue;
     }
+    const conf =
+      typeof lm.inFrameLikelihood === 'number' ? lm.inFrameLikelihood : 0;
     if (body.length > 0) {
       body += ';';
     }
-    body += `${key}:${lm.x},${lm.y}`;
+    body += `${key}:${lm.x},${lm.y},${conf}`;
   }
 
   if (body.length === 0) {
@@ -97,8 +105,13 @@ export function keypointsFromMlkitPayload(payload: string): Keypoint[] {
     const coords = part.slice(colon + 1).split(',');
     const x = Number(coords[0]);
     const y = Number(coords[1]);
+    const conf = coords.length >= 3 ? Number(coords[2]) : 0;
     if (Number.isFinite(x) && Number.isFinite(y)) {
-      pose[key] = { x, y };
+      pose[key] = {
+        x,
+        y,
+        inFrameLikelihood: Number.isFinite(conf) ? conf : 0,
+      };
     }
   }
 
@@ -117,7 +130,7 @@ export function keypointsFromMlkitPayload(payload: string): Keypoint[] {
       name: KEYPOINT_NAMES[index] ?? key,
       x: lm.x / frameWidth,
       y: lm.y / frameHeight,
-      score: 0.85,
+      score: typeof lm.inFrameLikelihood === 'number' ? lm.inFrameLikelihood : 0,
     };
   }
 
