@@ -8,6 +8,18 @@ import {
   isStanding,
 } from './framePresence';
 import { parseMlkitPayload } from './mlkitPose';
+import {
+  POSE_MISS_FRAMES_NO_PERSON,
+  POSE_STATUS_LEAVE_OK_FRAMES,
+  POSE_STATUS_OK_FRAMES,
+  POSE_STATUS_STABLE_FRAMES,
+  POSE_UI_INTERVAL_MS,
+} from './poseCaptureConfig';
+import {
+  diagnoseUpperBody,
+  formatUpperBodyDiag,
+} from './personDetectionDebug';
+import { logPresencePipeline, logPresenceResult } from './poseFrameDebug';
 import type { Keypoint, PresenceResult, PresenceStatus } from './types';
 
 export type PoseUpdate = {
@@ -41,16 +53,16 @@ let displayedPresence: PresenceResult | null = null;
 let candidateStatus: PresenceStatus | null = null;
 let candidateStreak = 0;
 
-const UI_INTERVAL_MS = 100;
+const UI_INTERVAL_MS = POSE_UI_INTERVAL_MS;
 const OK_FRAMES_NEEDED = 3;
 const STANDING_FRAMES = 3;
 const LOCK_SITTING = 72;
 const BAD_SITTING_UNLOCK = 4;
 
-const MISS_FRAMES_NO_PERSON = 8;
-const STATUS_STABLE_FRAMES = 3;
-const STATUS_OK_FRAMES = 2;
-const STATUS_LEAVE_OK_FRAMES = 5;
+const MISS_FRAMES_NO_PERSON = POSE_MISS_FRAMES_NO_PERSON;
+const STATUS_STABLE_FRAMES = POSE_STATUS_STABLE_FRAMES;
+const STATUS_OK_FRAMES = POSE_STATUS_OK_FRAMES;
+const STATUS_LEAVE_OK_FRAMES = POSE_STATUS_LEAVE_OK_FRAMES;
 
 export function setPreviewConfig(_config: PreviewConfig): void {}
 
@@ -230,11 +242,22 @@ function emitPresence(raw: PresenceResult): void {
 
   const now = Date.now();
   if (now - lastUiMs < UI_INTERVAL_MS) {
+    logPresencePipeline({
+      source: 'emit_skip_throttle',
+      smoothedLuma: Math.round(smoothedLuminance),
+      missStreak,
+      status: raw.status,
+      visibleCount: raw.visibleCount,
+      title: raw.title,
+      uiSkipped: true,
+    });
     return;
   }
   lastUiMs = now;
 
-  listener({ presence: stabilizeDisplay(raw) });
+  const displayed = stabilizeDisplay(raw);
+  logPresenceResult(displayed);
+  listener({ presence: displayed });
 }
 
 function applyNoPerson(luminance?: number): void {
@@ -247,6 +270,15 @@ function applyNoPerson(luminance?: number): void {
   if (isSceneTooDark(smoothedLuminance)) {
     const raw = evaluateFramePresence([], 0, false, {
       luminance: smoothedLuminance,
+    });
+    logPresencePipeline({
+      source: 'no_person',
+      rawLuma: luminance != null ? Math.round(luminance) : undefined,
+      smoothedLuma: Math.round(smoothedLuminance),
+      missStreak,
+      status: raw.status,
+      visibleCount: raw.visibleCount,
+      title: raw.title,
     });
     emitPresence({
       ...raw,
@@ -263,6 +295,15 @@ function applyNoPerson(luminance?: number): void {
   okStreak = 0;
 
   if (missStreak < MISS_FRAMES_NO_PERSON) {
+    logPresencePipeline({
+      source: 'no_person',
+      rawLuma: luminance != null ? Math.round(luminance) : undefined,
+      smoothedLuma: Math.round(smoothedLuminance),
+      missStreak,
+      status: displayedPresence?.status ?? 'holding',
+      visibleCount: displayedPresence?.visibleCount ?? 0,
+      title: `holding (${missStreak}/${MISS_FRAMES_NO_PERSON})`,
+    });
     if (displayedPresence != null) {
       emitPresence(displayedPresence);
     }
@@ -284,6 +325,17 @@ function applyNoPerson(luminance?: number): void {
   const raw = evaluateFramePresence([], 0, false, {
     luminance: smoothedLuminance,
   });
+  logPresencePipeline({
+    source: 'no_person',
+    rawLuma: luminance != null ? Math.round(luminance) : undefined,
+    smoothedLuma: Math.round(smoothedLuminance),
+    missStreak,
+    status: raw.status,
+    visibleCount: raw.visibleCount,
+    title: raw.title,
+    rejectReason:
+      'no pose frames (null/empty) or miss streak exceeded — empty keypoints',
+  });
   emitPresence({
     ...raw,
     debug: { sitting: 0, frame: 0, luminance: Math.round(smoothedLuminance) },
@@ -291,7 +343,22 @@ function applyNoPerson(luminance?: number): void {
 }
 
 function applyPosePayload(payload: string): void {
-  if (!listener || payload.length === 0) {
+  if (!listener) {
+    return;
+  }
+
+  if (payload.length === 0) {
+    logPresencePipeline({
+      source: 'pose_rejected',
+      smoothedLuma: Math.round(smoothedLuminance),
+      missStreak,
+      status: 'empty_payload',
+      visibleCount: 0,
+      title: 'ML Kit returned no landmarks above threshold',
+      rejectReason:
+        'worklet payload empty — native pose null/{} or all landmarks below conf gate',
+    });
+    applyNoPerson(undefined);
     return;
   }
 
@@ -299,10 +366,33 @@ function applyPosePayload(payload: string): void {
   updateLuminance(meta.luminance);
 
   if (!personDetected(rawKeypoints)) {
+    const diag = diagnoseUpperBody(rawKeypoints);
+    logPresencePipeline({
+      source: 'pose_rejected',
+      rawLuma: meta.luminance != null ? Math.round(meta.luminance) : undefined,
+      smoothedLuma: Math.round(smoothedLuminance),
+      missStreak,
+      status: 'no_upper_body',
+      visibleCount: rawKeypoints.filter(p => p.score >= 0.4).length,
+      title: 'Landmarks parsed but person not detected',
+      rejectReason: formatUpperBodyDiag(diag),
+      frameSize: `${meta.frameWidth}x${meta.frameHeight}`,
+    });
+    console.log('[PoseReject]', formatUpperBodyDiag(diag));
     applyNoPerson(meta.luminance ?? undefined);
     return;
   }
 
   missStreak = 0;
-  emitPresence(updateStablePresence(rawKeypoints));
+  const raw = updateStablePresence(rawKeypoints);
+  logPresencePipeline({
+    source: 'pose',
+    rawLuma: meta.luminance != null ? Math.round(meta.luminance) : undefined,
+    smoothedLuma: Math.round(smoothedLuminance),
+    missStreak,
+    status: raw.status,
+    visibleCount: raw.visibleCount,
+    title: raw.title,
+  });
+  emitPresence(raw);
 }

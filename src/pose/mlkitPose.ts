@@ -7,6 +7,32 @@ import type { Keypoint } from './types';
 const MIN_CONFIDENCE = 0.4;
 
 /**
+ * iOS native plugin historically omitted inFrameLikelihood (score becomes 0 in JS).
+ * Landmarks that reached JS with real x/y were already gated at ~0.5 on native.
+ */
+const NATIVE_PRESENT_SCORE = 0.75;
+
+function effectiveLandmarkScore(
+  conf: number,
+  x: number,
+  y: number,
+): number {
+  'worklet';
+  if (conf >= MIN_CONFIDENCE) {
+    return conf;
+  }
+  if (
+    conf === 0 &&
+    Number.isFinite(x) &&
+    Number.isFinite(y) &&
+    !(x === 0 && y === 0)
+  ) {
+    return NATIVE_PRESENT_SCORE;
+  }
+  return conf;
+}
+
+/**
  * Angle (degrees) from vertical beyond which the spine is considered "bent".
  * Tune this value: 10° is strict, 20° is forgiving.
  */
@@ -65,17 +91,18 @@ function readLandmark(
 
   // FIX: only skip (0,0) if confidence is also absent/zero — pure (0,0) with
   // a real confidence value is theoretically a valid top-left point.
-  const conf = typeof raw.inFrameLikelihood === 'number' ? raw.inFrameLikelihood : 0;
+  const rawConf =
+    typeof raw.inFrameLikelihood === 'number' ? raw.inFrameLikelihood : 0;
+  const conf = effectiveLandmarkScore(rawConf, raw.x, raw.y);
   if (raw.x === 0 && raw.y === 0 && conf === 0) {
     return null;
   }
 
-  // FIX: drop low-confidence landmarks instead of passing junk downstream
   if (conf > 0 && conf < MIN_CONFIDENCE) {
     return null;
   }
 
-  return raw;
+  return { ...raw, inFrameLikelihood: conf };
 }
 
 function midpoint(
@@ -108,9 +135,10 @@ export function mlkitPoseToPayload(
 
     if (lm == null || lm.x == null || lm.y == null) continue;
 
-    const conf = typeof lm.inFrameLikelihood === 'number' ? lm.inFrameLikelihood : 0;
+    const rawConf =
+      typeof lm.inFrameLikelihood === 'number' ? lm.inFrameLikelihood : 0;
+    const conf = effectiveLandmarkScore(rawConf, lm.x, lm.y);
 
-    // FIX: apply confidence gate in worklet too
     if (conf > 0 && conf < MIN_CONFIDENCE) continue;
     if (lm.x === 0 && lm.y === 0 && conf === 0) continue;
 

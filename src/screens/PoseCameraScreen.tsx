@@ -17,6 +17,11 @@ import {
   setPoseListener,
   setPreviewConfig,
 } from '../pose/poseBridge';
+import {
+  POSE_CAPTURE_FPS,
+  POSE_CAPTURE_INTERVAL_SEC,
+} from '../pose/poseCaptureConfig';
+import { getLogFrameCapture } from '../pose/poseFrameDebug';
 import type { PresenceResult } from '../pose/types';
 
 const INITIAL_PRESENCE: PresenceResult = {
@@ -42,9 +47,13 @@ export default function PoseCameraScreen() {
 
   const pushPosePayload = useMemo(() => getPushPosePayload(), []);
   const pushNoPerson = useMemo(() => getPushNoPerson(), []);
+  const logFrameCapture = useMemo(() => getLogFrameCapture(), []);
   const isFrontCamera = device?.position === 'front';
 
   useEffect(() => {
+    console.log(
+      `[PoseCamera] Slow capture: 1 frame every ${POSE_CAPTURE_INTERVAL_SEC}s (${POSE_CAPTURE_FPS} FPS)`,
+    );
     setPoseListener(update => {
       setPresence(update.presence);
     });
@@ -63,38 +72,67 @@ export default function PoseCameraScreen() {
     frame => {
       'worklet';
 
-      runAtTargetFps(10, () => {
+      runAtTargetFps(POSE_CAPTURE_FPS, () => {
         'worklet';
         runAsync(frame, () => {
           'worklet';
+          const baseLog = {
+            tick: Date.now(),
+            width: frame.width,
+            height: frame.height,
+            pixelFormat: String(frame.pixelFormat),
+          };
           try {
             const luminance = estimateFrameLuminance(frame);
             const pose = detectPose(frame, POSE_OPTIONS) as Record<
               string,
               unknown
             > | null;
-            if (pose == null) {
+            const poseKeys =
+              pose != null && typeof pose === 'object'
+                ? Object.keys(pose as object).length
+                : 0;
+            if (pose == null || poseKeys === 0) {
+              logFrameCapture({
+                ...baseLog,
+                rawLuma: Math.round(luminance),
+                pose: pose == null ? 'null' : 'empty_object',
+                landmarkKeys: poseKeys,
+              });
               pushNoPerson(luminance);
               return;
             }
+            const landmarkKeys = poseKeys;
             const payload = mlkitPoseToPayload(
               pose,
               frame.width,
               frame.height,
               luminance,
             );
+            logFrameCapture({
+              ...baseLog,
+              rawLuma: Math.round(luminance),
+              pose: payload.length > 0 ? 'ok' : 'empty',
+              landmarkKeys,
+              payloadLen: payload.length,
+            });
             if (payload.length > 0) {
               pushPosePayload(payload);
             } else {
               pushNoPerson(luminance);
             }
-          } catch {
-            // ML Kit busy or frame dropped — skip.
+          } catch (e) {
+            logFrameCapture({
+              ...baseLog,
+              rawLuma: -1,
+              pose: 'error',
+              error: e instanceof Error ? e.message : String(e),
+            });
           }
         });
       });
     },
-    [pushPosePayload, pushNoPerson],
+    [pushPosePayload, pushNoPerson, logFrameCapture],
   );
 
   useEffect(() => {
@@ -165,7 +203,8 @@ export default function PoseCameraScreen() {
         ) : null}
 
         <Text style={styles.debug}>
-          visible: {presence.visibleCount} • inFrame:{' '}
+          capture: every {POSE_CAPTURE_INTERVAL_SEC}s • visible:{' '}
+          {presence.visibleCount} • inFrame:{' '}
           {presence.isInFrame ? 'yes' : 'no'} • sitting:{' '}
           {presence.isSitting ? 'yes' : 'no'} • score:{' '}
           {presence.debug?.sitting ?? 0} • frame:{' '}

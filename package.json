@@ -5,11 +5,12 @@
   "scripts": {
     "android": "node scripts/patch-mlkit-pose-kotlin.js && react-native run-android",
     "fix-android": "bash scripts/fix-android-gradle.sh",
-    "ios": "react-native run-ios",
+    "ios": "node scripts/patch-mlkit-pose-ios-podspec.js && node scripts/patch-mlkit-pose-ios-native.js && react-native run-ios",
+    "pod-install": "node scripts/patch-mlkit-pose-ios-podspec.js && node scripts/patch-mlkit-pose-ios-native.js && cd ios && pod install",
     "lint": "eslint .",
     "start": "react-native start",
     "test": "jest",
-    "postinstall": "node scripts/patch-gradle-foojay.js && node scripts/patch-mlkit-pose-kotlin.js"
+    "postinstall": "node scripts/patch-gradle-foojay.js && node scripts/patch-mlkit-pose-kotlin.js && node scripts/patch-mlkit-pose-ios-podspec.js && node scripts/patch-mlkit-pose-ios-native.js"
   },
   "dependencies": {
     "@scottjgilroy/react-native-vision-camera-v4-pose-detection": "^1.2.2",
