@@ -1,16 +1,19 @@
 import { DIM_LUMINANCE_THRESHOLD } from './frameBrightness';
 import type { Keypoint, PresenceResult } from './types';
 
+export const NOT_FULLY_VISIBLE_MESSAGE =
+  "Please sit comfortably on the floor or on a chair and be fully visible in the camera";
+export const SEATED_VISIBLE_SUCCESS_MESSAGE = 'Great, you are seated and visible.';
+
 /** ML Kit's `inFrameLikelihood` — values above this are considered visible. */
 const MIN_SCORE = 0.5;
+/** Minimum body height in frame (normalized) — roughly within ~1m of camera. */
+const MIN_NEAR_BODY_HEIGHT_RATIO = 0.42;
 /** Lower bar for leg landmarks (ML Kit drops these more often). */
 const LEG_MIN_SCORE = 0.38;
 const FACE_SCORE = 0.58;
 const FACE_EDGE_MARGIN = 0.06;
 const BODY_EDGE_MARGIN = 0.03;
-
-const SITTING_OK_FRAME = 72;
-const SITTING_BAD_FRAME = 45;
 
 const STRAIGHT_LEG_ANGLE = 165;
 const BENT_LEG_ANGLE = 150;
@@ -210,6 +213,120 @@ export function isClearlyOutOfFrame(keypoints: Keypoint[]): boolean {
 
 export function isPersonInFrame(keypoints: Keypoint[]): boolean {
   return hasUpperBody(keypoints) && !isClearlyOutOfFrame(keypoints);
+}
+
+export function getBodyHeightRatio(keypoints: Keypoint[]): number {
+  const indices = [0, 5, 6, 11, 12, 13, 14, 15, 16];
+  const ys = indices
+    .map(i => keypoints[i])
+    .filter((p): p is Keypoint => p != null && p.score >= LEG_MIN_SCORE)
+    .map(p => p.y);
+
+  if (ys.length < 4) {
+    return 0;
+  }
+
+  return Math.max(...ys) - Math.min(...ys);
+}
+
+export function isPersonWithinDistance(keypoints: Keypoint[]): boolean {
+  return getBodyHeightRatio(keypoints) >= MIN_NEAR_BODY_HEIGHT_RATIO;
+}
+
+export function isPersonTooFar(keypoints: Keypoint[]): boolean {
+  return hasUpperBody(keypoints) && !isPersonWithinDistance(keypoints);
+}
+
+export function isLikelySleeping(keypoints: Keypoint[]): boolean {
+  const bodyIndices = [5, 6, 11, 12, 13, 14, 15, 16];
+  const visible = bodyIndices
+    .map(i => kpLeg(keypoints, i))
+    .filter((p): p is Keypoint => p != null);
+
+  if (visible.length < 5) {
+    return false;
+  }
+
+  const xs = visible.map(p => p.x);
+  const ys = visible.map(p => p.y);
+  const width = Math.max(...xs) - Math.min(...xs);
+  const height = Math.max(...ys) - Math.min(...ys);
+  const bodyIsWide = width > height * 1.45;
+
+  const lSh = kpLeg(keypoints, 5);
+  const rSh = kpLeg(keypoints, 6);
+  const lHip = kpLeg(keypoints, 11);
+  const rHip = kpLeg(keypoints, 12);
+  const lAnkle = kpLeg(keypoints, 15);
+  const rAnkle = kpLeg(keypoints, 16);
+
+  const shoulderCenter =
+    lSh && rSh ? mid(lSh, rSh) : lSh ?? rSh ?? null;
+  const hipCenter = lHip && rHip ? mid(lHip, rHip) : lHip ?? rHip ?? null;
+  const ankleCenter =
+    lAnkle && rAnkle ? mid(lAnkle, rAnkle) : lAnkle ?? rAnkle ?? null;
+
+  const torsoHorizontal =
+    shoulderCenter && hipCenter
+      ? Math.abs(hipCenter.x - shoulderCenter.x) >
+      Math.abs(hipCenter.y - shoulderCenter.y) * 1.15
+      : false;
+  const bodyAxisHorizontal =
+    shoulderCenter && ankleCenter
+      ? Math.abs(ankleCenter.x - shoulderCenter.x) >
+      Math.abs(ankleCenter.y - shoulderCenter.y) * 1.2
+      : false;
+
+  return bodyIsWide && (torsoHorizontal || bodyAxisHorizontal);
+}
+
+export type SeatedPosture = 'standing' | 'sitting' | 'sleeping' | 'unknown';
+
+export function classifySeatedPosture(keypoints: Keypoint[]): SeatedPosture {
+  if (isLikelySleeping(keypoints)) {
+    return 'sleeping';
+  }
+
+  const { left, right, count, minAngle, maxAngle, avg } = legKneeAngles(keypoints);
+  if (count === 0 || avg == null) {
+    return 'unknown';
+  }
+
+  const angles = [left, right].filter((v): v is number => v != null);
+  const min = minAngle as number;
+  const max = maxAngle as number;
+
+  if (avg >= 150 || (angles.length >= 2 && min >= 145)) {
+    return 'standing';
+  }
+
+  if (avg <= 132 || min <= 120 || max <= 135) {
+    return 'sitting';
+  }
+
+  return 'unknown';
+}
+
+export function isSeatedAndFullyVisible(
+  keypoints: Keypoint[],
+  luminance?: number | null,
+): boolean {
+  if (isSceneTooDark(luminance)) {
+    return false;
+  }
+  if (!hasUpperBody(keypoints) || isClearlyOutOfFrame(keypoints)) {
+    return false;
+  }
+  if (!isPersonWithinDistance(keypoints)) {
+    return false;
+  }
+  if (!hasClearFace(keypoints)) {
+    return false;
+  }
+  if (!hasAnklesInFrame(keypoints)) {
+    return false;
+  }
+  return classifySeatedPosture(keypoints) === 'sitting';
 }
 
 type LegAngles = {
@@ -584,9 +701,49 @@ function buildResult(
       { id: 'full_body', label: 'Full body in frame', passed: fullBody },
       { id: 'face', label: 'Head / face visible', passed: hasClearFaceCheck },
       { id: 'no_crop', label: 'Upper body not cropped', passed: noCropCheck },
-      { id: 'sitting', label: 'Legs folded / crossed', passed: isSitting },
+      { id: 'sitting', label: 'Seated', passed: isSitting },
     ],
   };
+}
+
+function buildNotFullyVisible(
+  visibleCount: number,
+  keypoints: Keypoint[],
+  luminance?: number | null,
+): PresenceResult {
+  const faceClear = hasClearFace(keypoints);
+  const fullBody = hasFullBodyInFrame(keypoints);
+  const lightingOk = !isSceneTooDark(luminance);
+  const inFrame =
+    hasUpperBody(keypoints) &&
+    !isClearlyOutOfFrame(keypoints) &&
+    isPersonWithinDistance(keypoints);
+
+  return buildResult(
+    'out_of_frame',
+    visibleCount,
+    inFrame,
+    false,
+    faceClear,
+    hasFullUpperBodyInFrame(keypoints),
+    '',
+    NOT_FULLY_VISIBLE_MESSAGE,
+    { fullBody, lightingOk },
+  );
+}
+
+function buildSeatedVisibleOk(visibleCount: number): PresenceResult {
+  return buildResult(
+    'ok',
+    visibleCount,
+    true,
+    true,
+    true,
+    true,
+    '',
+    SEATED_VISIBLE_SUCCESS_MESSAGE,
+    { fullBody: true, lightingOk: true },
+  );
 }
 
 export type FramePresenceOptions = {
@@ -595,271 +752,15 @@ export type FramePresenceOptions = {
 
 export function evaluateFramePresence(
   keypoints: Keypoint[],
-  smoothedSitting: number,
-  sittingLocked: boolean,
+  _smoothedSitting = 0,
+  _sittingLocked = false,
   options: FramePresenceOptions = {},
 ): PresenceResult {
   const visibleCount = keypoints.filter(p => p.score >= MIN_SCORE).length;
-  const faceClear = hasClearFace(keypoints);
-  const noCrop = hasFullUpperBodyInFrame(keypoints);
-  const fullBody = hasFullBodyInFrame(keypoints);
-  const lightingOk = !isSceneTooDark(options.luminance);
 
-  if (!lightingOk) {
-    return buildResult(
-      'too_dark',
-      visibleCount,
-      false,
-      false,
-      false,
-      false,
-      'Turn on the lights',
-      'The room is too dim. Please turn on the lights so you are clearly visible.',
-      { fullBody: false, lightingOk: false },
-    );
+  if (isSeatedAndFullyVisible(keypoints, options.luminance)) {
+    return buildSeatedVisibleOk(visibleCount);
   }
 
-  if (!hasUpperBody(keypoints)) {
-    return buildResult(
-      'no_person',
-      visibleCount,
-      false,
-      false,
-      false,
-      false,
-      'Person not visible',
-      'Sit in front of the camera so your full body can be seen.',
-      { fullBody: false, lightingOk: true },
-    );
-  }
-
-  if (isClearlyOutOfFrame(keypoints)) {
-    return buildResult(
-      'out_of_frame',
-      visibleCount,
-      false,
-      false,
-      faceClear,
-      noCrop,
-      'Out of frame',
-      'Move so your full body is inside the camera view.',
-      { fullBody: false, lightingOk: true },
-    );
-  }
-
-  if (isHeadOutOfFrame(keypoints)) {
-    return buildResult(
-      'out_of_frame',
-      visibleCount,
-      false,
-      false,
-      false,
-      noCrop,
-      'Show your head',
-      'Your head is cut off. Move your phone up or tilt it up until your face is fully visible.',
-      { fullBody: false, lightingOk: true },
-    );
-  }
-
-  if (isFeetOutOfFrame(keypoints)) {
-    return buildResult(
-      'out_of_frame',
-      visibleCount,
-      false,
-      false,
-      faceClear,
-      noCrop,
-      'Show your feet',
-      'Your ankles are not visible. Tilt your phone down until your full legs and feet are in frame.',
-      { fullBody: false, lightingOk: true },
-    );
-  }
-
-  if (!faceClear) {
-    return buildResult(
-      'out_of_frame',
-      visibleCount,
-      false,
-      false,
-      false,
-      noCrop,
-      'Show your face',
-      'Keep your face clear, forward, and unobstructed.',
-      { fullBody: false, lightingOk: true },
-    );
-  }
-
-  if (!noCrop) {
-    return buildResult(
-      'out_of_frame',
-      visibleCount,
-      false,
-      false,
-      true,
-      false,
-      'No cropping',
-      'Keep your full body inside the frame — head to ankles.',
-      { fullBody: false, lightingOk: true },
-    );
-  }
-
-  if (!fullBody) {
-    return buildResult(
-      'out_of_frame',
-      visibleCount,
-      false,
-      false,
-      faceClear,
-      noCrop,
-      'Full body needed',
-      'Adjust the camera so your head and both ankles are visible from head to toe.',
-      { fullBody: false, lightingOk: true },
-    );
-  }
-
-  if (isStanding(keypoints)) {
-    return buildResult(
-      'not_sitting',
-      visibleCount,
-      true,
-      false,
-      faceClear,
-      noCrop,
-      'Please sit down',
-      'You are standing — please sit.',
-      { fullBody: true, lightingOk: true },
-    );
-  }
-
-  // STRICT: hips + knees must be visible for any sitting verdict.
-  const lHip = kpLeg(keypoints, 11);
-  const rHip = kpLeg(keypoints, 12);
-  const lKnee = kpLeg(keypoints, 13);
-  const rKnee = kpLeg(keypoints, 14);
-
-  if (!lHip || !rHip) {
-    return buildResult(
-      'not_sitting',
-      visibleCount,
-      true,
-      false,
-      faceClear,
-      noCrop,
-      'Show your hips',
-      'Move back so your hips are clearly visible in the frame.',
-      { fullBody: true, lightingOk: true },
-    );
-  }
-
-  if (!lKnee || !rKnee) {
-    return buildResult(
-      'not_sitting',
-      visibleCount,
-      true,
-      false,
-      faceClear,
-      noCrop,
-      'Show your legs',
-      'Tilt your phone down or move back so both knees and ankles are visible.',
-      { fullBody: true, lightingOk: true },
-    );
-  }
-
-  if (hasMixedLegs(keypoints)) {
-    return buildResult(
-      'not_sitting',
-      visibleCount,
-      true,
-      false,
-      faceClear,
-      noCrop,
-      'Fold both legs',
-      'One leg is straight and the other is bent. Fold both legs the same way.',
-      { fullBody: true, lightingOk: true },
-    );
-  }
-
-  if (isCrossLegged(keypoints) && smoothedSitting >= SITTING_BAD_FRAME) {
-    return buildResult(
-      'ok',
-      visibleCount,
-      true,
-      true,
-      true,
-      true,
-      'All good',
-      'Cross-legged sitting detected — perfect!',
-      { fullBody: true, lightingOk: true },
-    );
-  }
-
-  // Detect "legs straight" (both knees nearly straight but not standing).
-  const angles = legKneeAngles(keypoints);
-  if (
-    angles.count === 2 &&
-    angles.left != null &&
-    angles.right != null &&
-    angles.left >= STRAIGHT_LEG_ANGLE - 10 &&
-    angles.right >= STRAIGHT_LEG_ANGLE - 10
-  ) {
-    return buildResult(
-      'not_sitting',
-      visibleCount,
-      true,
-      false,
-      faceClear,
-      noCrop,
-      'Fold your legs',
-      'Your legs are straight. Fold them (cross-legged) to sit properly.',
-      { fullBody: true, lightingOk: true },
-    );
-  }
-
-  const frameSitting = getSittingScore(keypoints);
-
-  // Legs not measurable this frame => not valid for final "ok".
-  if (frameSitting < 0) {
-    return buildResult(
-      'not_sitting',
-      visibleCount,
-      true,
-      false,
-      faceClear,
-      noCrop,
-      'Hold still',
-      'Keep your full body in view while we detect your posture.',
-      { fullBody: true, lightingOk: true },
-    );
-  }
-
-  const sittingOk =
-    frameSitting >= SITTING_OK_FRAME &&
-    smoothedSitting >= SITTING_BAD_FRAME &&
-    !hasMixedLegs(keypoints);
-
-  if (sittingOk) {
-    return buildResult(
-      'ok',
-      visibleCount,
-      true,
-      true,
-      true,
-      true,
-      'All good',
-      'You are sitting properly with your full body visible.',
-      { fullBody: true, lightingOk: true },
-    );
-  }
-
-  return buildResult(
-    'not_sitting',
-    visibleCount,
-    true,
-    false,
-    faceClear,
-    noCrop,
-    'Sit properly',
-    'Sit cross-legged with both knees bent and your full body visible.',
-    { fullBody: true, lightingOk: true },
-  );
+  return buildNotFullyVisible(visibleCount, keypoints, options.luminance);
 }

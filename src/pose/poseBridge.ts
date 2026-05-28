@@ -1,11 +1,10 @@
 import { Worklets } from 'react-native-worklets-core';
 import {
+  classifySeatedPosture,
   evaluateFramePresence,
-  getSittingScore,
   hasUpperBody,
   isClearlyOutOfFrame,
   isSceneTooDark,
-  isStanding,
 } from './framePresence';
 import { parseMlkitPayload } from './mlkitPose';
 import {
@@ -39,14 +38,12 @@ let pushPosePayloadFn: ((payload: string) => void) | null = null;
 let pushNoPersonFn: ((luminance?: number) => void) | null = null;
 let lastUiMs = 0;
 
-let smoothedSitting = 0;
-let lastFrameSitting = 0;
-let okStreak = 0;
-let standingStreak = 0;
-let sittingLocked = false;
+let lastFramePosture: ReturnType<typeof classifySeatedPosture> = 'unknown';
 
 let missStreak = 0;
-let badSittingStreak = 0;
+let successLatched = false;
+let latchedPresence: PresenceResult | null = null;
+let successStartedAtMs: number | null = null;
 let smoothedLuminance = 255;
 
 let displayedPresence: PresenceResult | null = null;
@@ -54,10 +51,7 @@ let candidateStatus: PresenceStatus | null = null;
 let candidateStreak = 0;
 
 const UI_INTERVAL_MS = POSE_UI_INTERVAL_MS;
-const OK_FRAMES_NEEDED = 3;
-const STANDING_FRAMES = 3;
-const LOCK_SITTING = 72;
-const BAD_SITTING_UNLOCK = 4;
+const LATCH_SUCCESS_MS = 3000;
 
 const MISS_FRAMES_NO_PERSON = POSE_MISS_FRAMES_NO_PERSON;
 const STATUS_STABLE_FRAMES = POSE_STATUS_STABLE_FRAMES;
@@ -88,17 +82,15 @@ export function getPushNoPerson(): (luminance?: number) => void {
 }
 
 function resetStability(): void {
-  smoothedSitting = 0;
-  lastFrameSitting = 0;
-  okStreak = 0;
-  standingStreak = 0;
-  sittingLocked = false;
+  lastFramePosture = 'unknown';
   missStreak = 0;
-  badSittingStreak = 0;
   displayedPresence = null;
   candidateStatus = null;
   candidateStreak = 0;
   smoothedLuminance = 255;
+  successLatched = false;
+  latchedPresence = null;
+  successStartedAtMs = null;
 }
 
 function updateLuminance(luminance: number | null | undefined): void {
@@ -112,85 +104,42 @@ function personDetected(keypoints: Keypoint[]): boolean {
   return hasUpperBody(keypoints) && !isClearlyOutOfFrame(keypoints);
 }
 
-/** Update smoothed score without the slow 2→60 ramp loop. */
-function updateSmoothedScore(frameSitting: number): void {
-  lastFrameSitting = frameSitting;
-
-  if (frameSitting >= LOCK_SITTING) {
-    smoothedSitting = Math.max(smoothedSitting, frameSitting);
-    return;
-  }
-
-  if (frameSitting < 0) {
-    return;
-  }
-
-  if (frameSitting === 0) {
-    smoothedSitting = Math.max(0, smoothedSitting - 8);
-    return;
-  }
-
-  smoothedSitting = Math.max(
-    smoothedSitting,
-    smoothedSitting * 0.4 + frameSitting * 0.6,
-  );
-}
-
 function updateStablePresence(keypoints: Keypoint[]): PresenceResult {
-  const frameSitting = getSittingScore(keypoints);
-  updateSmoothedScore(frameSitting);
+  lastFramePosture = classifySeatedPosture(keypoints);
 
-  if (isStanding(keypoints)) {
-    standingStreak += 1;
-  } else {
-    standingStreak = 0;
-  }
-
-  if (standingStreak >= STANDING_FRAMES) {
-    sittingLocked = false;
-    okStreak = 0;
-    badSittingStreak = 0;
-    smoothedSitting = 0;
-  } else if (frameSitting >= LOCK_SITTING) {
-    okStreak += 1;
-    badSittingStreak = 0;
-    if (okStreak >= OK_FRAMES_NEEDED) {
-      sittingLocked = true;
-    }
-  } else if (frameSitting === 0) {
-    okStreak = 0;
-    if (sittingLocked) {
-      badSittingStreak += 1;
-      if (badSittingStreak >= BAD_SITTING_UNLOCK) {
-        sittingLocked = false;
-        smoothedSitting = 0;
-        badSittingStreak = 0;
-      }
-    }
-  } else if (frameSitting < 0 && sittingLocked) {
-    // Missing leg landmarks while locked is treated as weak negative evidence.
-    badSittingStreak += 1;
-    if (badSittingStreak >= BAD_SITTING_UNLOCK + 2) {
-      sittingLocked = false;
-      smoothedSitting = 0;
-      badSittingStreak = 0;
-    }
-  } else if (frameSitting > 0 && frameSitting < LOCK_SITTING) {
-    okStreak = Math.max(0, okStreak - 1);
-  }
-
-  const result = evaluateFramePresence(keypoints, smoothedSitting, sittingLocked, {
+  const result = evaluateFramePresence(keypoints, 0, false, {
     luminance: smoothedLuminance,
   });
 
   return {
     ...result,
     debug: {
-      sitting: Math.round(smoothedSitting),
-      frame: lastFrameSitting,
+      sitting: result.isSitting ? 100 : 0,
+      frame: lastFramePosture === 'sitting' ? 100 : 0,
       luminance: Math.round(smoothedLuminance),
     },
   };
+}
+
+function trackSuccessLatch(raw: PresenceResult): PresenceResult {
+  if (successLatched && latchedPresence) {
+    return latchedPresence;
+  }
+
+  if (raw.status === 'ok') {
+    const now = Date.now();
+    if (successStartedAtMs == null) {
+      successStartedAtMs = now;
+    } else if (now - successStartedAtMs >= LATCH_SUCCESS_MS) {
+      successLatched = true;
+      latchedPresence = { ...raw };
+      return latchedPresence;
+    }
+  } else {
+    successStartedAtMs = null;
+  }
+
+  return raw;
 }
 
 function framesNeededForStatus(status: PresenceStatus): number {
@@ -240,6 +189,8 @@ function emitPresence(raw: PresenceResult): void {
     return;
   }
 
+  raw = trackSuccessLatch(raw);
+
   const now = Date.now();
   if (now - lastUiMs < UI_INTERVAL_MS) {
     logPresencePipeline({
@@ -262,6 +213,11 @@ function emitPresence(raw: PresenceResult): void {
 
 function applyNoPerson(luminance?: number): void {
   if (!listener) {
+    return;
+  }
+
+  if (successLatched && latchedPresence) {
+    emitPresence(latchedPresence);
     return;
   }
 
@@ -292,7 +248,6 @@ function applyNoPerson(luminance?: number): void {
   }
 
   missStreak += 1;
-  okStreak = 0;
 
   if (missStreak < MISS_FRAMES_NO_PERSON) {
     logPresencePipeline({
@@ -309,18 +264,6 @@ function applyNoPerson(luminance?: number): void {
     }
     return;
   }
-
-  if (sittingLocked && missStreak < MISS_FRAMES_NO_PERSON * 2) {
-    if (displayedPresence != null) {
-      emitPresence(displayedPresence);
-    }
-    return;
-  }
-
-  sittingLocked = false;
-  badSittingStreak = 0;
-  smoothedSitting = 0;
-  lastFrameSitting = 0;
 
   const raw = evaluateFramePresence([], 0, false, {
     luminance: smoothedLuminance,
@@ -344,6 +287,11 @@ function applyNoPerson(luminance?: number): void {
 
 function applyPosePayload(payload: string): void {
   if (!listener) {
+    return;
+  }
+
+  if (successLatched && latchedPresence) {
+    emitPresence(latchedPresence);
     return;
   }
 

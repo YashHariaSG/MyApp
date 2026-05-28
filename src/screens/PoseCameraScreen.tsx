@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { StyleSheet, Text, View } from 'react-native';
+import { AppState, Dimensions, Platform, StyleSheet, Text, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { detectPose } from '@scottjgilroy/react-native-vision-camera-v4-pose-detection/src/detectPose';
 import {
   Camera,
@@ -21,6 +22,7 @@ import {
   POSE_CAPTURE_FPS,
   POSE_CAPTURE_INTERVAL_SEC,
 } from '../pose/poseCaptureConfig';
+import { NOT_FULLY_VISIBLE_MESSAGE } from '../pose/framePresence';
 import { getLogFrameCapture } from '../pose/poseFrameDebug';
 import type { PresenceResult } from '../pose/types';
 
@@ -40,10 +42,19 @@ const POSE_OPTIONS = {
 };
 
 export default function PoseCameraScreen() {
-  const device = useCameraDevice('front') ?? useCameraDevice('back');
+  const frontDevice = useCameraDevice('front');
+  const backDevice = useCameraDevice('back');
+  const device = frontDevice ?? backDevice;
   const { hasPermission, requestPermission } = useCameraPermission();
   const [layout, setLayout] = useState({ width: 0, height: 0 });
   const [presence, setPresence] = useState<PresenceResult>(INITIAL_PRESENCE);
+  const [appState, setAppState] = useState(AppState.currentState);
+  const [resumeEpoch, setResumeEpoch] = useState(0);
+  const [screenEpoch, setScreenEpoch] = useState(() => {
+    const { width, height } = Dimensions.get('window');
+    return `${width}x${height}`;
+  });
+  const insets = useSafeAreaInsets();
 
   const pushPosePayload = useMemo(() => getPushPosePayload(), []);
   const pushNoPerson = useMemo(() => getPushNoPerson(), []);
@@ -67,6 +78,29 @@ export default function PoseCameraScreen() {
       mirror: isFrontCamera,
     });
   }, [layout.width, layout.height, isFrontCamera]);
+
+  // Remount camera only when the window actually resizes (real UI rotation).
+  // Do NOT use onPreviewOrientationChanged — on iOS it still fires while rotation
+  // lock is on and causes a one-time HUD/camera rotation glitch.
+  useEffect(() => {
+    const subscription = Dimensions.addEventListener('change', ({ window }) => {
+      setScreenEpoch(`${window.width}x${window.height}`);
+    });
+    return () => subscription.remove();
+  }, []);
+
+  // Notification shade / quick-settings toggles can temporarily break preview
+  // transform state on some devices. Remount camera when app becomes active.
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', next => {
+      const wasBackgrounded = appState !== 'active' && next === 'active';
+      setAppState(next);
+      if (wasBackgrounded) {
+        setResumeEpoch(prev => prev + 1);
+      }
+    });
+    return () => sub.remove();
+  }, [appState]);
 
   const frameProcessor = useFrameProcessor(
     frame => {
@@ -158,6 +192,12 @@ export default function PoseCameraScreen() {
   }
 
   const hudStyle = getHudStyle(presence.status);
+  const hudMessage = presence.message || NOT_FULLY_VISIBLE_MESSAGE;
+  const cameraIsActive = appState === 'active';
+  const cameraKey =
+    Platform.OS === 'android'
+      ? `${device.id}-${screenEpoch}-${resumeEpoch}`
+      : device.id;
 
   return (
     <View
@@ -167,42 +207,27 @@ export default function PoseCameraScreen() {
         setLayout({ width, height });
       }}>
       <Camera
+        key={cameraKey}
         style={styles.camera}
         device={device}
-        isActive
+        isActive={cameraIsActive}
         photo={false}
         video={false}
         audio={false}
+        outputOrientation="preview"
+        androidPreviewViewType="texture-view"
         frameProcessor={frameProcessor}
       />
 
-      <View style={[styles.hud, hudStyle.container]}>
-        <Text style={styles.hudStatus}>
-          {presence.status.toUpperCase().replace(/_/g, ' ')}
-        </Text>
-        {presence.title ? (
-          <Text style={styles.hudTitle}>{presence.title}</Text>
-        ) : null}
-        {presence.message ? (
-          <Text style={styles.hudMessage}>{presence.message}</Text>
-        ) : null}
+      <View
+        style={[
+          styles.hud,
+          hudStyle.container,
+          { bottom: Math.max(16, insets.bottom + 12) },
+        ]}>
+        <Text style={styles.hudMessage}>{hudMessage}</Text>
 
-        {presence.checks.length > 0 ? (
-          <View style={styles.checksRow}>
-            {presence.checks.map(check => (
-              <Text
-                key={check.id}
-                style={[
-                  styles.check,
-                  check.passed ? styles.checkPass : styles.checkFail,
-                ]}>
-                {check.passed ? '✓' : '✗'} {check.label}
-              </Text>
-            ))}
-          </View>
-        ) : null}
-
-        <Text style={styles.debug}>
+        {/* <Text style={styles.debug}>
           capture: every {POSE_CAPTURE_INTERVAL_SEC}s • visible:{' '}
           {presence.visibleCount} • inFrame:{' '}
           {presence.isInFrame ? 'yes' : 'no'} • sitting:{' '}
@@ -210,7 +235,7 @@ export default function PoseCameraScreen() {
           {presence.debug?.sitting ?? 0} • frame:{' '}
           {presence.debug?.frame ?? '—'} • lux:{' '}
           {presence.debug?.luminance ?? '—'}
-        </Text>
+        </Text> */}
       </View>
     </View>
   );
@@ -219,19 +244,10 @@ export default function PoseCameraScreen() {
 function getHudStyle(status: PresenceResult['status']): {
   container: object;
 } {
-  switch (status) {
-    case 'ok':
-      return { container: styles.hudOk };
-    case 'out_of_frame':
-      return { container: styles.hudWarn };
-    case 'not_sitting':
-      return { container: styles.hudError };
-    case 'too_dark':
-      return { container: styles.hudDark };
-    case 'no_person':
-    default:
-      return { container: styles.hudNeutral };
+  if (status === 'ok') {
+    return { container: styles.hudOk };
   }
+  return { container: styles.hudWarn };
 }
 
 const styles = StyleSheet.create({
@@ -258,7 +274,6 @@ const styles = StyleSheet.create({
     position: 'absolute',
     left: 16,
     right: 16,
-    bottom: 32,
     padding: 14,
     borderRadius: 12,
     borderWidth: 2,
@@ -283,39 +298,12 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(30, 30, 60, 0.9)',
     borderColor: '#7c8cff',
   },
-  hudStatus: {
-    color: '#fff',
-    fontSize: 11,
-    fontWeight: '600',
-    letterSpacing: 1.2,
-    opacity: 0.8,
-    marginBottom: 2,
-  },
-  hudTitle: {
-    color: '#fff',
-    fontSize: 17,
-    fontWeight: '700',
-    marginBottom: 4,
-  },
   hudMessage: {
     color: '#fff',
-    fontSize: 13,
-    opacity: 0.9,
+    fontSize: 15,
+    fontWeight: '600',
+    lineHeight: 21,
     marginBottom: 8,
-  },
-  checksRow: {
-    marginTop: 4,
-    marginBottom: 6,
-  },
-  check: {
-    fontSize: 12,
-    marginVertical: 1,
-  },
-  checkPass: {
-    color: '#9eff9e',
-  },
-  checkFail: {
-    color: '#ffb0b0',
   },
   debug: {
     color: '#ddd',
